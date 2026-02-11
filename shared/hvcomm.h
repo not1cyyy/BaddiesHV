@@ -13,7 +13,7 @@
 #define HVCOMM_H
 
 #ifdef _KERNEL_MODE
-#include <ntddk.h>
+#include <ntifs.h>
 #else
 #include <stdint.h>
 #include <windows.h>
@@ -54,12 +54,17 @@ typedef int64_t INT64;
  * ============================================================================
  */
 
-#define HV_CMD_REGISTER 0x00 /* Register shared page (init only)      */
-#define HV_CMD_PING 0x01     /* Echo test — HV writes result = 1      */
-#define HV_CMD_READ 0x02     /* Read process memory                   */
-#define HV_CMD_WRITE 0x03    /* Write process memory                  */
-#define HV_CMD_GET_CR3 0x04  /* Get DirectoryTableBase for a PID      */
-#define HV_CMD_DEVIRT 0xFF   /* Devirtualize all processors (unload)  */
+#define HV_CMD_REGISTER 0x00    /* Register shared page (init only)      */
+#define HV_CMD_PING 0x01        /* Echo test — HV writes result = 1      */
+#define HV_CMD_READ 0x02        /* Read process memory                   */
+#define HV_CMD_WRITE 0x03       /* Write process memory                  */
+#define HV_CMD_GET_CR3 0x04     /* Get DirectoryTableBase for a PID      */
+#define HV_CMD_ALLOC 0x05       /* Allocate RWX in target process        */
+#define HV_CMD_FIND_MODULE 0x06 /* Get module base from target PEB       */
+#define HV_CMD_READ_SAFE 0x07   /* Deferred read via worker (PASSIVE_LVL)*/
+#define HV_CMD_WRITE_SAFE 0x08  /* Deferred write via worker (PASSIVE_LVL)*/
+#define HV_CMD_UNLOCK_MDL 0x09  /* Release MDL-locked alloc pages        */
+#define HV_CMD_DEVIRT 0xFF      /* Devirtualize all processors (unload)  */
 
 /* Two-step shared page registration via CPUID ECX encoding.
  * MSVC x64 __cpuidex only lets us control EAX and ECX, so we encode
@@ -86,6 +91,9 @@ typedef int64_t INT64;
 #define HV_STATUS_TRANSLATION_FAIL 0x80000005
 #define HV_STATUS_NOT_REGISTERED 0x80000006
 #define HV_STATUS_ALREADY_REGISTERED 0x80000007
+#define HV_STATUS_ALLOC_FAILED 0x80000008
+#define HV_STATUS_MODULE_NOT_FOUND 0x80000009
+#define HV_STATUS_PENDING 0x00000010 /* Deferred op in progress   */
 
 /* ============================================================================
  * HV_REQUEST — The command structure written to the shared page.

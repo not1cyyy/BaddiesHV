@@ -20,7 +20,7 @@
 #ifndef NPT_H
 #define NPT_H
 
-#include <ntddk.h>
+#include <ntifs.h>
 
 /* ============================================================================
  * Guest Page Table Entry Bits (standard x86-64)

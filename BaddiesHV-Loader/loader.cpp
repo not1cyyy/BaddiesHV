@@ -1,29 +1,39 @@
 /*
  * loader.cpp — BaddiesHV Usermode Loader
  *
- * Phase 2: Shared page registration + memory read/write test
+ * Phase 6: Integrated KDMapper + shared page + memory R/W + overlay injection
  *
  * Usage:
- *   1. Load BaddiesHV-Driver.sys using KDMapper
- *   2. Run this loader to test hypercalls
- *   3. Use menu to register shared page, read memory, devirtualize
+ *   1. Run this loader (as admin)
+ *   2. Select 'Load driver' to map BaddiesHV-Driver.sys
+ *   3. Use menu for hypercall operations or inject overlay
  */
 
 #include "../shared/hvcomm.h"
+#include "injector.h"
+#include <filesystem>
 #include <intrin.h>
+#include <iostream>
 #include <stdio.h>
 #include <string.h>
+#include <string>
 #include <tlhelp32.h>
+#include <vector>
 #include <wchar.h>
 #include <windows.h>
+
+/* KDMapper headers */
+#include "intel_driver.hpp"
+#include "kdmapper.hpp"
+#include "utils.hpp"
 
 /* ============================================================================
  *  Global State
  * ============================================================================
  */
 
-static HV_SHARED_PAGE *g_SharedPage = nullptr;
-static bool g_Registered = false;
+HV_SHARED_PAGE *g_SharedPage = nullptr;
+bool g_Registered = false;
 
 /* ============================================================================
  *  Helpers
@@ -192,6 +202,11 @@ static void TestRegisterSharedPage() {
   }
   ZeroMemory(g_SharedPage, sizeof(HV_SHARED_PAGE));
 
+  /* Pin both physical pages so they can't be paged out.
+   * The VMEXIT handler accesses these pages at HIGH_IRQL where
+   * page faults cannot be serviced. */
+  VirtualLock(g_SharedPage, sizeof(HV_SHARED_PAGE));
+
   printf("[*] Shared page at VA = 0x%llX\n", (UINT64)g_SharedPage);
   printf("[*] Registering with HV...\n");
 
@@ -341,25 +356,140 @@ static void TestWriteMemory() {
 }
 
 /* ============================================================================
+ *  Driver Loading via KDMapper
+ * ============================================================================
+ */
+
+static std::wstring FindDriverPath() {
+  /* Look for BaddiesHV.sys in common locations relative to the loader */
+  wchar_t exePath[MAX_PATH];
+  GetModuleFileNameW(NULL, exePath, MAX_PATH);
+  std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
+
+  /* Search order: same dir, ../bin/Debug, ../bin/Release, ../x64/Debug,
+   * ../x64/Release */
+  std::vector<std::filesystem::path> searchPaths = {
+      exeDir / L"BaddiesHV.sys",
+      exeDir / L".." / L"BaddiesHV.sys",
+      exeDir / L".." / L"bin" / L"Debug" / L"BaddiesHV.sys",
+      exeDir / L".." / L"bin" / L"Release" / L"BaddiesHV.sys",
+      exeDir / L".." / L"x64" / L"Debug" / L"BaddiesHV.sys",
+      exeDir / L".." / L"x64" / L"Release" / L"BaddiesHV.sys",
+  };
+
+  for (const auto &p : searchPaths) {
+    if (std::filesystem::exists(p))
+      return std::filesystem::canonical(p).wstring();
+  }
+  return L"";
+}
+
+static bool LoadDriver() {
+  /* Find the driver binary */
+  std::wstring driverPath = FindDriverPath();
+  if (driverPath.empty()) {
+    printf("[-] BaddiesHV.sys not found.\n");
+    printf("    Place it in the same folder as the loader.\n");
+    printf("    Or enter path manually: ");
+    wchar_t path[MAX_PATH];
+    if (wscanf_s(L"%259s", path, (unsigned)_countof(path)) == 1) {
+      driverPath = path;
+    } else {
+      return false;
+    }
+  }
+
+  if (!std::filesystem::exists(driverPath)) {
+    wprintf(L"[-] File not found: %s\n", driverPath.c_str());
+    return false;
+  }
+
+  wprintf(L"[*] Driver: %s\n", driverPath.c_str());
+
+  /* Step 1: Load the vulnerable Intel driver */
+  printf("[*] Loading Intel driver...\n");
+  if (!NT_SUCCESS(intel_driver::Load())) {
+    printf("[-] Failed to load Intel driver.\n");
+    return false;
+  }
+  printf("[+] Intel driver loaded.\n");
+
+  /* Step 2: Read driver file */
+  std::vector<uint8_t> raw_image;
+  if (!kdmUtils::ReadFileToMemory(driverPath, &raw_image)) {
+    printf("[-] Failed to read driver file.\n");
+    intel_driver::Unload();
+    return false;
+  }
+  printf("[+] Driver read (%llu bytes).\n",
+         (unsigned long long)raw_image.size());
+
+  /* Step 3: Map driver into kernel */
+  printf("[*] Mapping driver...\n");
+  NTSTATUS exitCode = 0;
+  ULONG64 result =
+      kdmapper::MapDriver(raw_image.data(), 0, 0, /* param1, param2 — unused */
+                          false, /* free = false (driver stays loaded) */
+                          true,  /* destroyHeader = true (stealth) */
+                          kdmapper::AllocationMode::AllocatePool,
+                          false,   /* PassAllocationAddressAsFirstParam */
+                          nullptr, /* callback */
+                          &exitCode);
+
+  /* Step 4: Cleanup Intel driver */
+  if (!NT_SUCCESS(intel_driver::Unload())) {
+    printf("[!] Warning: failed to fully unload Intel driver.\n");
+  }
+
+  if (!result) {
+    printf("[-] Failed to map driver.\n");
+    return false;
+  }
+
+  printf("[+] Driver mapped! DriverEntry returned 0x%08X\n",
+         (unsigned)exitCode);
+  return NT_SUCCESS(exitCode);
+}
+
+/* ============================================================================
  *  Main
  * ============================================================================
  */
 
 int main() {
   printf("========================================\n");
-  printf("  BaddiesHV Loader v2.0                 \n");
-  printf("  Phase 2: NPT + Memory R/W            \n");
+  printf("  BaddiesHV Loader v3.0                 \n");
+  printf("  Phase 4: KDMapper + Memory R/W        \n");
   printf("========================================\n\n");
 
   UINT32 core = 0;
   if (!HvPing(&core)) {
-    printf("[-] HV not active. Load driver first.\n");
-    return 1;
+    printf("[-] HV not active.\n");
+    printf("[*] Would you like to load the driver? (y/n): ");
+    int ch = getchar();
+    while (getchar() != '\n')
+      ; /* flush */
+    if (ch == 'y' || ch == 'Y') {
+      if (!LoadDriver()) {
+        printf("[-] Driver loading failed.\n");
+        return 1;
+      }
+      /* Verify HV is now active */
+      Sleep(500);
+      if (!HvPing(&core)) {
+        printf("[-] HV still not responding after load.\n");
+        return 1;
+      }
+    } else {
+      printf("[-] Exiting.\n");
+      return 1;
+    }
   }
   printf("[+] HV active (core %u)\n\n", core);
 
   while (true) {
     printf("\n--- Menu ---\n");
+    printf("  0. Load driver (KDMapper)\n");
     printf("  1. Ping all cores\n");
     printf("  2. Devirtualize\n");
     printf("  3. Exit (HV stays)\n");
@@ -367,6 +497,7 @@ int main() {
     printf("  5. Read memory\n");
     printf("  6. Get CR3\n");
     printf("  7. Write memory test\n");
+    printf("  8. Inject overlay\n");
     printf("  > ");
 
     int c = 0;
@@ -378,6 +509,9 @@ int main() {
     }
 
     switch (c) {
+    case 0:
+      LoadDriver();
+      break;
     case 1:
       TestPingAllCores();
       break;
@@ -398,6 +532,46 @@ int main() {
     case 7:
       TestWriteMemory();
       break;
+    case 8: {
+      /* Inject overlay */
+      printf(
+          "Enter game process name (e.g. DeadByDaylight-Win64-Shipping.exe): ");
+      char procName[256];
+      scanf_s("%255s", procName, (unsigned)sizeof(procName));
+
+      wchar_t wProcName[256];
+      size_t converted;
+      mbstowcs_s(&converted, wProcName, procName, _TRUNCATE);
+
+      DWORD pid = GetProcessIdByName(wProcName);
+      if (pid == 0) {
+        printf("[-] Process not found: %s\n", procName);
+        break;
+      }
+      printf("[+] Found PID: %u\n", pid);
+
+      /* Find overlay DLL next to loader */
+      wchar_t exePath[MAX_PATH];
+      GetModuleFileNameW(NULL, exePath, MAX_PATH);
+      std::wstring dllPath(exePath);
+      size_t lastSlash = dllPath.find_last_of(L"\\//");
+      if (lastSlash != std::wstring::npos)
+        dllPath = dllPath.substr(0, lastSlash + 1);
+      dllPath += L"BaddiesHV-Overlay.dll";
+
+      printf("[*] DLL path: %ls\n", dllPath.c_str());
+
+      if (InjectOverlayDll(pid, dllPath)) {
+        printf("\n[+] Injection successful! Loader can exit safely.\n");
+        printf("[*] Press Enter to exit...\n");
+        getchar();
+        getchar();
+        return 0;
+      } else {
+        printf("\n[-] Injection failed.\n");
+      }
+      break;
+    }
     default:
       printf("Invalid.\n");
       break;

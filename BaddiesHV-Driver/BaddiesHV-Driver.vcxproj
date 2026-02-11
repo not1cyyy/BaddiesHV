@@ -83,6 +83,7 @@
     <ClCompile Include="svm.c" />
     <ClCompile Include="npt.c" />
     <ClCompile Include="mem_ops.c" />
+    <ClCompile Include="alloc_worker.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="svm.h" />

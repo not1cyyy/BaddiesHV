@@ -21,7 +21,7 @@
 #include "../shared/hvcomm.h"
 #include "npt.h"
 #include <intrin.h>
-#include <ntddk.h>
+#include <ntifs.h>
 
 /* ============================================================================
  *  Undocumented but exported kernel APIs — manual declarations
@@ -658,6 +658,39 @@ typedef struct _HV_GLOBAL_DATA {
   BOOLEAN FlushByAsidSupported;
   BOOLEAN DecodeAssistSupported;
 
+  /* === Deferred allocator worker thread === */
+  HANDLE AllocThreadHandle;     /* Worker thread handle                */
+  PVOID AllocThreadObj;         /* Thread object for cleanup           */
+  volatile LONG AllocShutdown;  /* TRUE = shutdown worker thread       */
+  volatile LONG AllocReady;     /* 1 = new request pending (set by VMEXIT) */
+  volatile UINT32 AllocPid;     /* Target PID for allocation           */
+  volatile UINT64 AllocSize;    /* Requested allocation size           */
+  volatile UINT64 AllocResult;  /* Output: allocated base address      */
+  volatile LONG AllocStatus;    /* Output: 0=idle, 1=done, -1=failed  */
+  PVOID AllocMdl;               /* MDL for locking allocated pages     */
+  volatile LONG UnlockMdlReady; /* 1 = loader signals to unlock MDL   */
+
+  /* === Deferred safe-read (worker thread at PASSIVE_LEVEL) === */
+  volatile LONG DeferReadReady;  /* 1 = new read request pending      */
+  volatile LONG DeferReadStatus; /* 0=idle, 1=done, -1=failed         */
+  volatile UINT32 DeferReadPid;  /* Target PID for read               */
+  volatile UINT64 DeferReadAddr; /* Target VA to read from            */
+  volatile UINT64 DeferReadSize; /* Bytes to read (max HV_DATA_SIZE)  */
+  UINT8 DeferReadBuf[4096];      /* Result buffer (kernel-side)       */
+
+  /* === Deferred safe-write (worker thread at PASSIVE_LEVEL) === */
+  volatile LONG DeferWriteReady;  /* 1 = new write request pending    */
+  volatile LONG DeferWriteStatus; /* 0=idle, 1=done, -1=failed        */
+  volatile UINT32 DeferWritePid;  /* Target PID for write             */
+  volatile UINT64 DeferWriteAddr; /* Target VA to write to            */
+  volatile UINT64 DeferWriteSize; /* Bytes to write (max HV_DATA_SIZE)*/
+  UINT8 DeferWriteBuf[4096];      /* Data to write (kernel-side)      */
+
+  /* === Shared page kernel mapping (created by worker at PASSIVE_LEVEL) === */
+  volatile LONG SharedPageMapRequest; /* 1 = worker should map pages    */
+  volatile PVOID SharedPageKernelVa;  /* Kernel VA from MmMapIoSpace    */
+  UINT64 SharedPageGpa;               /* Guest Physical Address         */
+
 } HV_GLOBAL_DATA, *PHV_GLOBAL_DATA;
 
 /* Single global instance — defined in svm.c */
@@ -710,6 +743,18 @@ NTSTATUS HvWriteProcessMemory(_In_ PVCPU_DATA Vcpu, _In_ UINT32 Pid,
                               _In_ UINT64 GuestVa,
                               _In_reads_bytes_(Size) volatile UINT8 *DataBuffer,
                               _In_ UINT64 Size);
+NTSTATUS HvFindModuleBase(_In_ PVCPU_DATA Vcpu, _In_ UINT32 Pid,
+                          _In_ UINT64 ModuleNameHash, _Out_ PUINT64 BaseOut,
+                          _Out_opt_ UINT8 *DebugBuf, _In_ UINT32 DebugBufSize,
+                          _In_ UINT64 SharedPageCr3);
+
+/* ============================================================================
+ *  Function Declarations — alloc_worker.c
+ * ============================================================================
+ */
+
+NTSTATUS HvAllocWorkerInit(VOID);
+VOID HvAllocWorkerShutdown(VOID);
 
 /* ============================================================================
  *  Function Declarations — svm_asm.asm

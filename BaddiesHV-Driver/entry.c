@@ -17,7 +17,6 @@
 #include "../shared/hvcomm.h"
 #include "svm.h"
 
-
 #define HV_LOG(fmt, ...)                                                       \
   DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "[BaddiesHV] " fmt "\n",  \
              ##__VA_ARGS__)
@@ -36,6 +35,9 @@
 
 static VOID BhvDriverUnload(_In_ PDRIVER_OBJECT DriverObject) {
   UNREFERENCED_PARAMETER(DriverObject);
+
+  HV_LOG("DriverUnload — shutting down alloc worker...");
+  HvAllocWorkerShutdown();
 
   HV_LOG("DriverUnload — beginning devirtualize...");
   SvmDevirtualizeAllProcessors();
@@ -56,7 +58,6 @@ static VOID BhvDriverUnload(_In_ PDRIVER_OBJECT DriverObject) {
 
 NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
                      _In_ PUNICODE_STRING RegistryPath) {
-  UNREFERENCED_PARAMETER(RegistryPath);
   NTSTATUS status;
 
   HV_LOG("========================================");
@@ -64,8 +65,19 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
   HV_LOG("  Phase 1: SVM Bootstrap                ");
   HV_LOG("========================================");
 
-  /* Register unload handler */
-  DriverObject->DriverUnload = BhvDriverUnload;
+  /*
+   * Register unload handler only for legitimate (service-based) loads.
+   * When manually mapped via KDMapper, DriverObject belongs to the
+   * exploited Intel driver — we must NOT touch it.
+   * Detection: RegistryPath is NULL when manually mapped.
+   */
+  if (RegistryPath && RegistryPath->Length > 0) {
+    DriverObject->DriverUnload = BhvDriverUnload;
+    HV_LOG("Unload handler registered (service-based load)");
+  } else {
+    HV_LOG(
+        "Manual mapping detected — no unload handler (use DEVIRT hypercall)");
+  }
 
   /* Step 1: Check hardware support */
   HV_LOG("Step 1: Checking SVM hardware support...");
@@ -85,6 +97,17 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
     return status;
   }
   HV_LOG("Step 2: PASSED — All processors subverted");
+
+  /* Step 3: Start alloc worker thread */
+  HV_LOG("Step 3: Starting alloc worker thread...");
+  status = HvAllocWorkerInit();
+  if (!NT_SUCCESS(status)) {
+    HV_LOG_ERROR("Alloc worker init failed (0x%08X) — injection unavailable",
+                 status);
+    /* Non-fatal — HV still works for R/W, just can't alloc */
+  } else {
+    HV_LOG("Step 3: PASSED — Alloc worker thread active");
+  }
 
   HV_LOG("========================================");
   HV_LOG("  BaddiesHV is ACTIVE                   ");

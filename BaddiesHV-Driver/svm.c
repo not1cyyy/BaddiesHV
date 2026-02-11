@@ -878,12 +878,70 @@ BOOLEAN SvmVmexitHandler(_Inout_ PVCPU_DATA Vcpu,
       UINT32 cmd = subleaf & 0xFF;
       switch (cmd) {
 
-      case HV_CMD_PING:
+      case HV_CMD_PING: {
+        /* Standard ping response */
         GuestCtx->Rax = HV_CPUID_LEAF;
         GuestCtx->Rbx = 1;
         GuestCtx->Rcx = Vcpu->ProcessorIndex;
         GuestCtx->Rdx = 0;
+
+        /* === Relay alloc worker result to shared page if done === */
+        if (Vcpu->SharedPageRegistered && g_HvData.AllocStatus != 0) {
+          LONG allocSt = g_HvData.AllocStatus;
+          UINT64 allocRes = g_HvData.AllocResult;
+
+          UINT64 hostCr3 = __readcr3();
+          volatile HV_SHARED_PAGE *sp =
+              (volatile HV_SHARED_PAGE *)Vcpu->SharedPageVa;
+
+          __writecr3(Vcpu->SharedPageCr3);
+          sp->request.result = (allocSt == 1) ? allocRes : 0;
+          __writecr3(hostCr3);
+
+          InterlockedExchange(&g_HvData.AllocStatus, 0);
+        }
+
+        /* === Relay deferred read result to shared page if done === */
+        if (Vcpu->SharedPageRegistered && g_HvData.DeferReadStatus != 0) {
+          LONG readSt = g_HvData.DeferReadStatus;
+          UINT64 readSz = g_HvData.DeferReadSize;
+
+          UINT64 hostCr3 = __readcr3();
+          volatile HV_SHARED_PAGE *sp =
+              (volatile HV_SHARED_PAGE *)Vcpu->SharedPageVa;
+
+          __writecr3(Vcpu->SharedPageCr3);
+          if (readSt == 1 && readSz <= HV_DATA_SIZE) {
+            /* Use __movsb (REP MOVSB) instead of volatile byte loop.
+             * The volatile qualifier forces individual load/store ops;
+             * thousands of them under CR3 swap can crash VMware. */
+            __movsb((UINT8 *)sp->data, g_HvData.DeferReadBuf, (size_t)readSz);
+            sp->request.result = 1; /* 1 = success */
+          } else {
+            sp->request.result = 2; /* 2 = failure */
+          }
+          __writecr3(hostCr3);
+
+          InterlockedExchange(&g_HvData.DeferReadStatus, 0);
+        }
+
+        /* === Relay deferred write status to shared page if done === */
+        if (Vcpu->SharedPageRegistered && g_HvData.DeferWriteStatus != 0) {
+          LONG writeSt = g_HvData.DeferWriteStatus;
+
+          UINT64 hostCr3 = __readcr3();
+          volatile HV_SHARED_PAGE *sp =
+              (volatile HV_SHARED_PAGE *)Vcpu->SharedPageVa;
+
+          __writecr3(Vcpu->SharedPageCr3);
+          sp->request.result =
+              (writeSt == 1) ? 1 : 2; /* 1=success, 2=failure */
+          __writecr3(hostCr3);
+
+          InterlockedExchange(&g_HvData.DeferWriteStatus, 0);
+        }
         break;
+      }
 
       case HV_CMD_REGISTER_LO: {
         /* Two-step registration: Step 1 — cache low 24 bits of VA.
@@ -936,6 +994,7 @@ BOOLEAN SvmVmexitHandler(_Inout_ PVCPU_DATA Vcpu,
         Vcpu->SharedPageVa = sharedPageVa;
         Vcpu->SharedPageCr3 = guestCr3;
         Vcpu->SharedPageRegistered = TRUE;
+
         GuestCtx->Rax = HV_STATUS_SUCCESS;
         /* Return reconstructed VA for loader verification */
         GuestCtx->Rbx = (UINT64)(UINT32)(sharedPageVa & 0xFFFFFFFF);
@@ -949,7 +1008,7 @@ BOOLEAN SvmVmexitHandler(_Inout_ PVCPU_DATA Vcpu,
           break;
         }
 
-        /* Test: read shared page via CR3 swap, return guest CR3 as dummy */
+        /* Read shared page via CR3 swap, return guest CR3 */
         UINT64 hostCr3 = __readcr3();
         volatile HV_SHARED_PAGE *sp =
             (volatile HV_SHARED_PAGE *)Vcpu->SharedPageVa;
@@ -987,18 +1046,14 @@ BOOLEAN SvmVmexitHandler(_Inout_ PVCPU_DATA Vcpu,
         }
 
         UINT64 hostCr3 = __readcr3();
-        UINT64 spVa = Vcpu->SharedPageVa;
-        volatile HV_SHARED_PAGE *sp = (volatile HV_SHARED_PAGE *)spVa;
+        volatile HV_SHARED_PAGE *sp =
+            (volatile HV_SHARED_PAGE *)Vcpu->SharedPageVa;
 
-        /* --- Phase 1: Read request fields under guest CR3 --- */
         __writecr3(Vcpu->SharedPageCr3);
-
         UINT64 magic = sp->request.magic;
-        UINT32 reqCmd = sp->request.command;
         UINT32 reqPid = sp->request.pid;
         UINT64 reqAddr = sp->request.address;
         UINT64 reqSize = sp->request.size;
-
         __writecr3(hostCr3);
 
         /* Validate magic */
@@ -1022,8 +1077,7 @@ BOOLEAN SvmVmexitHandler(_Inout_ PVCPU_DATA Vcpu,
                                           (volatile UINT8 *)localBuf, readSize);
           if (NT_SUCCESS(cmdStatus)) {
             __writecr3(Vcpu->SharedPageCr3);
-            for (UINT64 i = 0; i < readSize; i++)
-              sp->data[i] = localBuf[i];
+            __movsb((UINT8 *)sp->data, localBuf, (size_t)readSize);
             __writecr3(hostCr3);
           }
           GuestCtx->Rax = NT_SUCCESS(cmdStatus) ? HV_STATUS_SUCCESS
@@ -1035,8 +1089,7 @@ BOOLEAN SvmVmexitHandler(_Inout_ PVCPU_DATA Vcpu,
             writeSize = sizeof(localBuf);
 
           __writecr3(Vcpu->SharedPageCr3);
-          for (UINT64 i = 0; i < writeSize; i++)
-            localBuf[i] = sp->data[i];
+          __movsb(localBuf, (const UINT8 *)sp->data, (size_t)writeSize);
           __writecr3(hostCr3);
 
           cmdStatus = HvWriteProcessMemory(
@@ -1044,6 +1097,172 @@ BOOLEAN SvmVmexitHandler(_Inout_ PVCPU_DATA Vcpu,
           GuestCtx->Rax = NT_SUCCESS(cmdStatus) ? HV_STATUS_SUCCESS
                                                 : HV_STATUS_TRANSLATION_FAIL;
         }
+        break;
+      }
+
+      case HV_CMD_ALLOC: {
+        /* Deferred allocation — signal worker thread */
+        if (!Vcpu->SharedPageRegistered) {
+          GuestCtx->Rax = HV_STATUS_NOT_REGISTERED;
+          break;
+        }
+
+        UINT64 hostCr3 = __readcr3();
+        volatile HV_SHARED_PAGE *sp =
+            (volatile HV_SHARED_PAGE *)Vcpu->SharedPageVa;
+
+        __writecr3(Vcpu->SharedPageCr3);
+        UINT64 magic = sp->request.magic;
+        UINT32 reqPid = sp->request.pid;
+        UINT64 reqSize = sp->request.size;
+        __writecr3(hostCr3);
+
+        if (magic != HV_MAGIC) {
+          GuestCtx->Rax = HV_STATUS_INVALID_MAGIC;
+          break;
+        }
+
+        /* Set worker parameters and signal via volatile flag */
+        g_HvData.AllocPid = reqPid;
+        g_HvData.AllocSize = reqSize;
+        g_HvData.AllocResult = 0;
+        InterlockedExchange(&g_HvData.AllocStatus, 0);
+        InterlockedExchange(&g_HvData.AllocReady, 1);
+
+        /* Return PENDING — loader polls via HV_CMD_PING */
+        GuestCtx->Rax = HV_STATUS_PENDING;
+        break;
+      }
+
+      case HV_CMD_FIND_MODULE: {
+        /* Find module base in target PEB */
+        if (!Vcpu->SharedPageRegistered) {
+          GuestCtx->Rax = HV_STATUS_NOT_REGISTERED;
+          break;
+        }
+
+        UINT64 hostCr3 = __readcr3();
+        volatile HV_SHARED_PAGE *sp =
+            (volatile HV_SHARED_PAGE *)Vcpu->SharedPageVa;
+
+        __writecr3(Vcpu->SharedPageCr3);
+        UINT64 magic = sp->request.magic;
+        UINT32 reqPid = sp->request.pid;
+        UINT64 modHash = sp->request.address;
+        __writecr3(hostCr3);
+
+        if (magic != HV_MAGIC) {
+          GuestCtx->Rax = HV_STATUS_INVALID_MAGIC;
+          break;
+        }
+
+        UINT64 moduleBase = 0;
+
+        /* dataBuf is just SharedPageVa + 128 (pointer arithmetic, no memory
+         * read needed) */
+        UINT8 *dataBuf = (UINT8 *)Vcpu->SharedPageVa + HV_HEADER_SIZE;
+
+        NTSTATUS cmdStatus = HvFindModuleBase(
+            Vcpu, reqPid, modHash, &moduleBase, (UINT8 *)dataBuf, HV_DATA_SIZE,
+            Vcpu->SharedPageCr3);
+
+        if (NT_SUCCESS(cmdStatus)) {
+          __writecr3(Vcpu->SharedPageCr3);
+          sp->request.result = moduleBase;
+          __writecr3(hostCr3);
+          GuestCtx->Rax = HV_STATUS_SUCCESS;
+        } else {
+          GuestCtx->Rax = HV_STATUS_MODULE_NOT_FOUND;
+        }
+        break;
+      }
+
+      case HV_CMD_READ_SAFE: {
+        /* Deferred read via worker thread — for file-backed pages that
+         * may not be resident.  Worker runs at PASSIVE_LEVEL where
+         * page faults are handled normally by the OS. */
+        if (!Vcpu->SharedPageRegistered) {
+          GuestCtx->Rax = HV_STATUS_NOT_REGISTERED;
+          break;
+        }
+
+        UINT64 hostCr3 = __readcr3();
+        volatile HV_SHARED_PAGE *sp =
+            (volatile HV_SHARED_PAGE *)Vcpu->SharedPageVa;
+
+        __writecr3(Vcpu->SharedPageCr3);
+        UINT64 magic = sp->request.magic;
+        UINT32 reqPid = sp->request.pid;
+        UINT64 reqAddr = sp->request.address;
+        UINT64 reqSize = sp->request.size;
+        __writecr3(hostCr3);
+
+        if (magic != HV_MAGIC) {
+          GuestCtx->Rax = HV_STATUS_INVALID_MAGIC;
+          break;
+        }
+
+        if (reqSize > HV_DATA_SIZE)
+          reqSize = HV_DATA_SIZE;
+
+        g_HvData.DeferReadPid = reqPid;
+        g_HvData.DeferReadAddr = reqAddr;
+        g_HvData.DeferReadSize = reqSize;
+        InterlockedExchange(&g_HvData.DeferReadStatus, 0);
+        InterlockedExchange(&g_HvData.DeferReadReady, 1);
+
+        GuestCtx->Rax = HV_STATUS_PENDING;
+        break;
+      }
+
+      case HV_CMD_WRITE_SAFE: {
+        /* Deferred write via worker thread — worker runs at PASSIVE_LEVEL
+         * where page faults are handled normally. */
+        if (!Vcpu->SharedPageRegistered) {
+          GuestCtx->Rax = HV_STATUS_NOT_REGISTERED;
+          break;
+        }
+
+        UINT64 hostCr3 = __readcr3();
+        volatile HV_SHARED_PAGE *sp =
+            (volatile HV_SHARED_PAGE *)Vcpu->SharedPageVa;
+
+        __writecr3(Vcpu->SharedPageCr3);
+
+        UINT64 magic = sp->request.magic;
+        UINT32 reqPid = sp->request.pid;
+        UINT64 reqAddr = sp->request.address;
+        UINT64 reqSize = sp->request.size;
+
+        /* Copy write data from shared page to kernel buffer.
+         * Use __movsb (REP MOVSB) — single instruction, not a
+         * volatile byte-by-byte loop that generates thousands of
+         * individual memory ops under CR3 swap (crashes VMware). */
+        if (reqSize > HV_DATA_SIZE)
+          reqSize = HV_DATA_SIZE;
+        __movsb(g_HvData.DeferWriteBuf, (const UINT8 *)sp->data,
+                (size_t)reqSize);
+        __writecr3(hostCr3);
+
+        if (magic != HV_MAGIC) {
+          GuestCtx->Rax = HV_STATUS_INVALID_MAGIC;
+          break;
+        }
+
+        g_HvData.DeferWritePid = reqPid;
+        g_HvData.DeferWriteAddr = reqAddr;
+        g_HvData.DeferWriteSize = reqSize;
+        InterlockedExchange(&g_HvData.DeferWriteStatus, 0);
+        InterlockedExchange(&g_HvData.DeferWriteReady, 1);
+
+        GuestCtx->Rax = HV_STATUS_PENDING;
+        break;
+      }
+      case HV_CMD_UNLOCK_MDL: {
+        /* Signal the worker thread to release MDL-locked allocation pages.
+         * MmUnlockPages must run at PASSIVE_LEVEL, not VMEXIT context. */
+        InterlockedExchange(&g_HvData.UnlockMdlReady, 1);
+        GuestCtx->Rax = HV_STATUS_SUCCESS;
         break;
       }
 

@@ -25,16 +25,17 @@
 #define GUEST_PT_INDEX(va) (((va) >> 12) & 0x1FF)
 
 /* ============================================================================
- * HvTranslateGuestVa — Translate a guest VA to GPA using CR3 swap.
+ * HvTranslateGuestVa — Translate a guest VA to GPA via manual page table walk.
  *
- * Instead of manually walking 4-level page tables via MmGetVirtualForPhysical
- * (which fails for page table pages during VMEXIT), we temporarily swap to
- * the target CR3 and call MmGetPhysicalAddress directly.
+ * Walks the 4-level x86-64 page table hierarchy (PML4 → PDPT → PD → PT)
+ * using MmGetVirtualForPhysical to access each level.  This is safe in
+ * VMEXIT context (GIF=0) because:
+ *   - We start from CR3 which is already a physical address
+ *   - MmGetVirtualForPhysical returns always-resident kernel VAs
+ *   - No page faults possible at any step
  *
- * Safe because:
- *   - GIF=0: no interrupts, no preemption
- *   - Kernel code + stack are mapped identically in all processes
- *   - We restore the original CR3 immediately after
+ * Previous approach (MmGetPhysicalAddress under CR3 swap) could page-fault
+ * if PTE pages themselves were paged out.
  * ============================================================================
  */
 
@@ -43,18 +44,73 @@ static NTSTATUS HvTranslateGuestVa(_In_ UINT64 GuestCr3, _In_ UINT64 GuestVa,
 
   *GuestPa = 0;
 
-  /* Swap to target CR3 so MmGetPhysicalAddress can resolve the VA */
-  UINT64 origCr3 = __readcr3();
-  __writecr3(GuestCr3);
+  /* Extract page table indices from the virtual address */
+  UINT64 pml4Index = (GuestVa >> 39) & 0x1FF;
+  UINT64 pdptIndex = (GuestVa >> 30) & 0x1FF;
+  UINT64 pdIndex = (GuestVa >> 21) & 0x1FF;
+  UINT64 ptIndex = (GuestVa >> 12) & 0x1FF;
+  UINT64 pageOffset = GuestVa & 0xFFF;
 
-  PHYSICAL_ADDRESS pa = MmGetPhysicalAddress((PVOID)GuestVa);
+  /* CR3 holds the physical address of PML4 (mask out flags in low bits) */
+  UINT64 pml4Pa = GuestCr3 & ~0xFFFULL;
 
-  __writecr3(origCr3);
-
-  if (pa.QuadPart == 0)
+  /* Level 4: PML4 */
+  PHYSICAL_ADDRESS phys;
+  phys.QuadPart = (LONGLONG)(pml4Pa + pml4Index * 8);
+  volatile UINT64 *pml4e = (volatile UINT64 *)MmGetVirtualForPhysical(phys);
+  if (!pml4e)
     return STATUS_UNSUCCESSFUL;
 
-  *GuestPa = (UINT64)pa.QuadPart;
+  UINT64 pml4eVal = *pml4e;
+  if (!(pml4eVal & 1)) /* Present bit */
+    return STATUS_UNSUCCESSFUL;
+
+  /* Level 3: PDPT */
+  UINT64 pdptPa = pml4eVal & 0x000FFFFFFFFFF000ULL;
+  phys.QuadPart = (LONGLONG)(pdptPa + pdptIndex * 8);
+  volatile UINT64 *pdpte = (volatile UINT64 *)MmGetVirtualForPhysical(phys);
+  if (!pdpte)
+    return STATUS_UNSUCCESSFUL;
+
+  UINT64 pdpteVal = *pdpte;
+  if (!(pdpteVal & 1))
+    return STATUS_UNSUCCESSFUL;
+
+  /* Check for 1GB huge page (PS bit) */
+  if (pdpteVal & 0x80) {
+    *GuestPa = (pdpteVal & 0x000FFFFFC0000000ULL) | (GuestVa & 0x3FFFFFFF);
+    return STATUS_SUCCESS;
+  }
+
+  /* Level 2: PD */
+  UINT64 pdPa = pdpteVal & 0x000FFFFFFFFFF000ULL;
+  phys.QuadPart = (LONGLONG)(pdPa + pdIndex * 8);
+  volatile UINT64 *pde = (volatile UINT64 *)MmGetVirtualForPhysical(phys);
+  if (!pde)
+    return STATUS_UNSUCCESSFUL;
+
+  UINT64 pdeVal = *pde;
+  if (!(pdeVal & 1))
+    return STATUS_UNSUCCESSFUL;
+
+  /* Check for 2MB large page (PS bit) */
+  if (pdeVal & 0x80) {
+    *GuestPa = (pdeVal & 0x000FFFFFFFE00000ULL) | (GuestVa & 0x1FFFFF);
+    return STATUS_SUCCESS;
+  }
+
+  /* Level 1: PT */
+  UINT64 ptPa = pdeVal & 0x000FFFFFFFFFF000ULL;
+  phys.QuadPart = (LONGLONG)(ptPa + ptIndex * 8);
+  volatile UINT64 *pte = (volatile UINT64 *)MmGetVirtualForPhysical(phys);
+  if (!pte)
+    return STATUS_UNSUCCESSFUL;
+
+  UINT64 pteVal = *pte;
+  if (!(pteVal & 1))
+    return STATUS_UNSUCCESSFUL;
+
+  *GuestPa = (pteVal & 0x000FFFFFFFFFF000ULL) | pageOffset;
   return STATUS_SUCCESS;
 }
 
@@ -230,20 +286,16 @@ HvReadProcessMemory(_In_ PVCPU_DATA Vcpu, _In_ UINT32 Pid, _In_ UINT64 GuestVa,
   if (Size == 0 || !DataBuffer)
     return STATUS_SUCCESS;
 
-  /* Get target process CR3 */
   UINT64 targetCr3;
   NTSTATUS status = HvCacheCr3(Vcpu, Pid, &targetCr3);
   if (!NT_SUCCESS(status))
     return status;
 
-  /* Swap to target CR3 and read directly */
   UINT64 hostCr3 = __readcr3();
   __writecr3(targetCr3);
-
   for (UINT64 i = 0; i < Size; i++) {
     DataBuffer[i] = *(volatile UINT8 *)(GuestVa + i);
   }
-
   __writecr3(hostCr3);
   return STATUS_SUCCESS;
 }
@@ -264,20 +316,188 @@ NTSTATUS HvWriteProcessMemory(_In_ PVCPU_DATA Vcpu, _In_ UINT32 Pid,
   if (Size == 0 || !DataBuffer)
     return STATUS_SUCCESS;
 
-  /* Get target process CR3 */
   UINT64 targetCr3;
   NTSTATUS status = HvCacheCr3(Vcpu, Pid, &targetCr3);
   if (!NT_SUCCESS(status))
     return status;
 
-  /* Swap to target CR3 and write directly */
   UINT64 hostCr3 = __readcr3();
   __writecr3(targetCr3);
-
   for (UINT64 i = 0; i < Size; i++) {
     *(volatile UINT8 *)(GuestVa + i) = DataBuffer[i];
   }
-
   __writecr3(hostCr3);
   return STATUS_SUCCESS;
+}
+
+/* ============================================================================
+ * HvFindModuleBase — Find a loaded module's base address in a target process.
+ *
+ * Walks the PEB → Ldr → InMemoryOrderModuleList via CR3 swap.
+ * Matches modules by djb2 hash of the lowercase module name.
+ *
+ * Windows 10/11 22H2 offsets:
+ *   EPROCESS + 0x550 = PEB (Wow64Process at 0x448, but we target x64)
+ *   PEB + 0x18 = Ldr (PEB_LDR_DATA*)
+ *   PEB_LDR_DATA + 0x20 = InMemoryOrderModuleList (LIST_ENTRY)
+ *   LDR_DATA_TABLE_ENTRY:
+ *     +0x00 = InMemoryOrderLinks (LIST_ENTRY -- relative to this field)
+ *     +0x20 = DllBase
+ *     +0x48 = BaseDllName (UNICODE_STRING: Length, MaxLength, Buffer)
+ *
+ * All reads are done under CR3 swap — zero kernel API calls.
+ * ============================================================================
+ */
+
+/* EPROCESS offset for PEB pointer (x64, Win10/11 22H2) */
+#define EPROCESS_PEB 0x550
+
+static UINT64 Djb2HashWide(UINT64 cr3, UINT64 hostCr3, UINT64 bufferVa,
+                           UINT32 lengthBytes) {
+  UINT64 hash = 5381;
+  UINT32 charCount = lengthBytes / sizeof(UINT16);
+  if (charCount > 128)
+    charCount = 128; /* Safety limit */
+
+  __writecr3(cr3);
+  for (UINT32 i = 0; i < charCount; i++) {
+    UINT16 wch = *(volatile UINT16 *)(bufferVa + i * sizeof(UINT16));
+    /* Lowercase */
+    if (wch >= L'A' && wch <= L'Z')
+      wch += 32;
+    hash = ((hash << 5) + hash) + (UINT64)wch;
+  }
+  __writecr3(hostCr3);
+  return hash;
+}
+
+/* Debug struct for PEB walk dump: 16 bytes per entry */
+typedef struct _MODULE_DEBUG_ENTRY {
+  UINT64 hash;
+  UINT64 base;
+} MODULE_DEBUG_ENTRY;
+
+NTSTATUS HvFindModuleBase(_In_ PVCPU_DATA Vcpu, _In_ UINT32 Pid,
+                          _In_ UINT64 ModuleNameHash, _Out_ PUINT64 BaseOut,
+                          _Out_opt_ UINT8 *DebugBuf, _In_ UINT32 DebugBufSize,
+                          _In_ UINT64 SharedPageCr3) {
+
+  *BaseOut = 0;
+
+  /* Get target CR3 and EPROCESS VA */
+  UINT64 targetCr3;
+  NTSTATUS status = HvCacheCr3(Vcpu, Pid, &targetCr3);
+  if (!NT_SUCCESS(status))
+    return status;
+
+  /* Find cached EPROCESS VA */
+  UINT64 eprocessVa = 0;
+  for (UINT32 i = 0; i < Vcpu->Cr3CacheCount; i++) {
+    if (Vcpu->Cr3Cache[i].Pid == Pid) {
+      eprocessVa = Vcpu->Cr3Cache[i].EprocessVa;
+      break;
+    }
+  }
+  if (eprocessVa == 0)
+    return STATUS_NOT_FOUND;
+
+  UINT64 guestCr3 = Vcpu->GuestVmcb->StateSave.Cr3;
+  UINT64 hostCr3 = __readcr3();
+
+  /* Read PEB pointer from EPROCESS */
+  UINT64 pebVa = ReadKernelVa64(guestCr3, hostCr3, eprocessVa + EPROCESS_PEB);
+  if (pebVa == 0)
+    return STATUS_NOT_FOUND;
+
+  /* Read PEB.Ldr (PEB + 0x18) — must read under TARGET CR3 (user memory) */
+  __writecr3(targetCr3);
+  UINT64 ldrVa = *(volatile UINT64 *)(pebVa + 0x18);
+  __writecr3(hostCr3);
+
+  if (ldrVa == 0)
+    return STATUS_NOT_FOUND;
+
+  /* Read InMemoryOrderModuleList head (PEB_LDR_DATA + 0x20) */
+  __writecr3(targetCr3);
+  UINT64 listHead = ldrVa + 0x20;
+  UINT64 firstFlink = *(volatile UINT64 *)listHead;
+  __writecr3(hostCr3);
+
+  if (firstFlink == 0 || firstFlink == listHead)
+    return STATUS_NOT_FOUND;
+
+  /* Walk the doubly linked list */
+  UINT64 current = firstFlink;
+  UINT32 maxIter = 256;
+  UINT32 dbgIdx = 0;
+  UINT32 dbgMax = DebugBuf ? (DebugBufSize / sizeof(MODULE_DEBUG_ENTRY)) : 0;
+
+  /* Write the search hash as entry[0] so loader can verify */
+  if (DebugBuf && dbgMax > 0) {
+    __writecr3(SharedPageCr3);
+    MODULE_DEBUG_ENTRY *e0 = (MODULE_DEBUG_ENTRY *)DebugBuf;
+    e0->hash = ModuleNameHash;
+    e0->base = 0xDEAD; /* sentinel to distinguish from module entries */
+    __writecr3(hostCr3);
+    dbgIdx = 1;
+  }
+
+  while (current != listHead && --maxIter > 0) {
+    /* LDR_DATA_TABLE_ENTRY:
+     * InMemoryOrderLinks is at offset 0x00 (relative to this link)
+     * DllBase = link - 0x10 + 0x30 = link + 0x20
+     * BaseDllName.Length = link - 0x10 + 0x58 = link + 0x48
+     * BaseDllName.Buffer = link - 0x10 + 0x60 = link + 0x50
+     *
+     * Actually: InMemoryOrderLinks is the SECOND LIST_ENTRY in
+     * LDR_DATA_TABLE_ENTRY (first is InLoadOrderLinks at 0x00).
+     * So the entry base = current - 0x10 (offsetof InMemoryOrderLinks).
+     * DllBase = entry + 0x30 = current + 0x20
+     * BaseDllName = entry + 0x58 = current + 0x48 (Length, MaxLength)
+     * BaseDllName.Buffer = entry + 0x60 = current + 0x50
+     */
+
+    __writecr3(targetCr3);
+    UINT64 dllBase = *(volatile UINT64 *)(current + 0x20);
+    UINT16 nameLen = *(volatile UINT16 *)(current + 0x48);
+    UINT64 nameBuf = *(volatile UINT64 *)(current + 0x50);
+    UINT64 nextFlink = *(volatile UINT64 *)current;
+    __writecr3(hostCr3);
+
+    if (nameBuf != 0 && nameLen > 0) {
+      UINT64 hash = Djb2HashWide(targetCr3, hostCr3, nameBuf, nameLen);
+
+      /* Write debug entry under SharedPageCr3 */
+      if (DebugBuf && dbgIdx < dbgMax) {
+        __writecr3(SharedPageCr3);
+        MODULE_DEBUG_ENTRY *e = (MODULE_DEBUG_ENTRY *)DebugBuf + dbgIdx;
+        e->hash = hash;
+        e->base = dllBase;
+        __writecr3(hostCr3);
+        dbgIdx++;
+      }
+
+      if (hash == ModuleNameHash) {
+        /* Write total count of modules walked so far into last 8 bytes */
+        if (DebugBuf && DebugBufSize >= 8) {
+          __writecr3(SharedPageCr3);
+          *(UINT64 *)(DebugBuf + DebugBufSize - 8) = (UINT64)dbgIdx;
+          __writecr3(hostCr3);
+        }
+        *BaseOut = dllBase;
+        return STATUS_SUCCESS;
+      }
+    }
+
+    current = nextFlink;
+  }
+
+  /* Write total count of modules walked into last 8 bytes of debug buf */
+  if (DebugBuf && DebugBufSize >= 8) {
+    __writecr3(SharedPageCr3);
+    *(UINT64 *)(DebugBuf + DebugBufSize - 8) = (UINT64)dbgIdx;
+    __writecr3(hostCr3);
+  }
+
+  return STATUS_NOT_FOUND;
 }
