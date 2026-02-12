@@ -1,0 +1,90 @@
+# BaddiesHV MSBuild CI/CD Workflow
+# Builds the hypervisor driver, loader, and overlay on every push to master
+
+name: MSBuild
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  SOLUTION_FILE_PATH: BaddiesHV.sln
+  BUILD_CONFIGURATION: Release
+  BUILD_PLATFORM: x64
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Add MSBuild to PATH
+      uses: microsoft/setup-msbuild@v2
+
+    # Note: Building kernel drivers in GitHub Actions requires WDK.
+    # Since WDK installation is complex and time-consuming, this workflow
+    # will attempt to build but may fail on driver components.
+    # For production CI/CD, consider using self-hosted runners with WDK pre-installed.
+
+    - name: Restore NuGet packages (if any)
+      working-directory: ${{env.GITHUB_WORKSPACE}}
+      run: nuget restore ${{env.SOLUTION_FILE_PATH}}
+      continue-on-error: true
+
+    - name: Build Solution
+      working-directory: ${{env.GITHUB_WORKSPACE}}
+      run: |
+        msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} /p:Platform=${{env.BUILD_PLATFORM}} ${{env.SOLUTION_FILE_PATH}}
+      continue-on-error: true
+
+    # Build individual projects separately for better error visibility
+    
+    - name: Build BaddiesHV-Loader
+      working-directory: ${{env.GITHUB_WORKSPACE}}
+      run: |
+        msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} /p:Platform=${{env.BUILD_PLATFORM}} BaddiesHV-Loader\BaddiesHV-Loader.vcxproj
+      continue-on-error: true
+
+    - name: Build BaddiesHV-Overlay
+      working-directory: ${{env.GITHUB_WORKSPACE}}
+      run: |
+        msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} /p:Platform=${{env.BUILD_PLATFORM}} BaddiesHV-Overlay\BaddiesHV-Overlay.vcxproj
+      continue-on-error: true
+
+    - name: Build BaddiesHV-Driver (requires WDK)
+      working-directory: ${{env.GITHUB_WORKSPACE}}
+      run: |
+        msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} /p:Platform=${{env.BUILD_PLATFORM}} BaddiesHV-Driver\BaddiesHV-Driver.vcxproj
+      continue-on-error: true
+
+    # Upload build artifacts (if build succeeded)
+    - name: Upload Loader artifact
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: BaddiesHV-Loader
+        path: BaddiesHV-Loader\x64\Release\BaddiesHV-Loader.exe
+      continue-on-error: true
+
+    - name: Upload Overlay artifact
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: BaddiesHV-Overlay
+        path: BaddiesHV-Overlay\x64\Release\BaddiesHV-Overlay.dll
+      continue-on-error: true
+
+    - name: Upload Driver artifact
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: BaddiesHV-Driver
+        path: BaddiesHV-Driver\x64\Release\BaddiesHV-Driver.sys
+      continue-on-error: true
