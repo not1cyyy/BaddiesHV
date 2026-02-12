@@ -255,6 +255,17 @@ KeSignalCallDpcSynchronize(_In_ PVOID SystemArgument2);
 #define INTERCEPT_EXCEPTION_MC (1UL << 18) /* #MC = vector 18 */
 
 /* ============================================================================
+ *  VMEXIT Exit Codes — VMCB.Control.ExitCode (offset 0x070)
+ *  AMD APM Vol 2, Appendix C
+ * ============================================================================
+ */
+#define VMEXIT_INTR        0x60  /* External interrupt (INTR) */
+#define VMEXIT_NMI         0x61  /* Non-Maskable Interrupt */
+#define VMEXIT_CPUID       0x72  /* CPUID instruction */
+#define VMEXIT_VMMCALL     0x81  /* VMMCALL instruction */
+#define VMEXIT_NPF         0x400 /* Nested Page Fault */
+
+/* ============================================================================
  *  VMCB Clean Bits — offset 0x0C0 in the control area
  *
  *  Setting a clean bit tells VMRUN "I didn't modify this field group."
@@ -387,6 +398,47 @@ typedef struct _VMCB_CONTROL_AREA {
 C_ASSERT(sizeof(VMCB_CONTROL_AREA) == 0x400);
 
 /* ============================================================================
+ *  Compile-time offset validation for VMCB Control Area
+ *  Ensures structure packing matches AMD APM Vol 2, Table B-1
+ * ============================================================================
+ */
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, InterceptCr) == 0x000);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, InterceptDr) == 0x004);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, InterceptException) == 0x008);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, InterceptMisc1) == 0x00C);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, InterceptMisc2) == 0x010);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, InterceptMisc3) == 0x014);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, PauseFilterThresh) == 0x03C);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, PauseFilterCount) == 0x03E);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, IopmBasePa) == 0x040);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, MsrpmBasePa) == 0x048);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, TscOffset) == 0x050);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, GuestAsid) == 0x058);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, TlbControl) == 0x05C);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, VIntrControl) == 0x060);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, VIntrVector) == 0x064);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, InterruptShadow) == 0x068);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, ExitCode) == 0x070);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, ExitInfo1) == 0x078);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, ExitInfo2) == 0x080);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, ExitIntInfo) == 0x088);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, NestedControl) == 0x090);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, AvicVapicBar) == 0x098);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, GhcbGpa) == 0x0A0);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, EventInj) == 0x0A8);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, NestedCr3) == 0x0B0);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, VirtExt) == 0x0B8);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, CleanBits) == 0x0C0);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, NextRip) == 0x0C8);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, InsnLen) == 0x0D0);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, InsnBytes) == 0x0D1);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, AvicBackingPage) == 0x0E0);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, AvicLogicalId) == 0x0F0);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, AvicPhysicalId) == 0x0F8);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, VmsaPA) == 0x108);
+C_ASSERT(FIELD_OFFSET(VMCB_CONTROL_AREA, SoftwareReserved) == 0x3E0);
+
+/* ============================================================================
  *  VMCB State Save Area — offsets 0x400 to 0xFFF (relative to VMCB start)
  *
  *  Offsets below are relative to the START of the state save area (0x400).
@@ -448,6 +500,53 @@ typedef struct _VMCB_STATE_SAVE_AREA {
 C_ASSERT(sizeof(VMCB_STATE_SAVE_AREA) == 0x600);
 
 /* ============================================================================
+ *  Compile-time offset validation for VMCB State Save Area
+ *  Ensures structure packing matches AMD APM Vol 2, Table B-2
+ *  Offsets are relative to the start of State Save Area (0x000 here, 0x400 absolute)
+ * ============================================================================
+ */
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Es) == 0x000);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Cs) == 0x010);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Ss) == 0x020);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Ds) == 0x030);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Fs) == 0x040);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Gs) == 0x050);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Gdtr) == 0x060);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Ldtr) == 0x070);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Idtr) == 0x080);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Tr) == 0x090);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Cpl) == 0x0CB);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Efer) == 0x0D0);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Cr4) == 0x148);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Cr3) == 0x150);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Cr0) == 0x158);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Dr7) == 0x160);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Dr6) == 0x168);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Rflags) == 0x170);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Rip) == 0x178);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Rsp) == 0x1D8);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, SCet) == 0x1E0);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Ssp) == 0x1E8);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, IsstAddr) == 0x1F0);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Rax) == 0x1F8);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Star) == 0x200);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Lstar) == 0x208);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Cstar) == 0x210);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Sfmask) == 0x218);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, KernelGsBase) == 0x220);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, SysenterCs) == 0x228);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, SysenterEsp) == 0x230);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, SysenterEip) == 0x238);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, Cr2) == 0x240);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, GPat) == 0x268);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, DbgCtl) == 0x270);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, BrFrom) == 0x278);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, BrTo) == 0x280);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, LastExcpFrom) == 0x288);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, LastExcpTo) == 0x290);
+C_ASSERT(FIELD_OFFSET(VMCB_STATE_SAVE_AREA, SpecCtrl) == 0x2E0);
+
+/* ============================================================================
  *  VMCB — The complete 4KB Virtual Machine Control Block
  *
  *  Must be allocated on a 4KB-aligned physical page.
@@ -464,6 +563,34 @@ typedef struct _VMCB {
 } VMCB, *PVMCB;
 
 C_ASSERT(sizeof(VMCB) == 0x1000); /* Must be exactly 4KB */
+
+/* ============================================================================
+ *  Compile-time offset validation for absolute VMCB offsets
+ *  These validate the complete VMCB structure (Control + State Save)
+ *  Critical for assembly code in svm_asm.asm which uses absolute offsets
+ * ============================================================================
+ */
+C_ASSERT(FIELD_OFFSET(VMCB, Control) == 0x000);
+C_ASSERT(FIELD_OFFSET(VMCB, StateSave) == 0x400);
+
+/* Validate critical absolute offsets used by assembly (svm_asm.asm) */
+C_ASSERT(FIELD_OFFSET(VMCB, StateSave.Rax) == 0x5F8);  /* VMCB_RAX in asm */
+C_ASSERT(FIELD_OFFSET(VMCB, StateSave.Rip) == 0x578);  /* VMCB_RIP in asm */
+C_ASSERT(FIELD_OFFSET(VMCB, StateSave.Rsp) == 0x5D8);  /* VMCB_RSP in asm */
+
+/* Validate critical offsets used in devirtualization (@@Devirtualize) */
+C_ASSERT(FIELD_OFFSET(VMCB, StateSave.Cr3) == 0x550);     /* Line 285 in asm */
+C_ASSERT(FIELD_OFFSET(VMCB, StateSave.Ss.Selector) == 0x420);  /* Line 289 */
+C_ASSERT(FIELD_OFFSET(VMCB, StateSave.Rflags) == 0x570);  /* Line 291 */
+C_ASSERT(FIELD_OFFSET(VMCB, StateSave.Cs.Selector) == 0x410);  /* Line 292 */
+
+/* Validate Control Area critical fields */
+C_ASSERT(FIELD_OFFSET(VMCB, Control.ExitCode) == 0x070);
+C_ASSERT(FIELD_OFFSET(VMCB, Control.ExitInfo1) == 0x078);
+C_ASSERT(FIELD_OFFSET(VMCB, Control.ExitInfo2) == 0x080);
+C_ASSERT(FIELD_OFFSET(VMCB, Control.EventInj) == 0x0A8);
+C_ASSERT(FIELD_OFFSET(VMCB, Control.NestedCr3) == 0x0B0);
+C_ASSERT(FIELD_OFFSET(VMCB, Control.NextRip) == 0x0C8);
 
 #pragma pack(pop)
 
@@ -641,9 +768,10 @@ typedef struct _HV_GLOBAL_DATA {
   PVOID MsrPermissionMap; /* MSRPM — 8KB (2 pages), page-aligned */
   PHYSICAL_ADDRESS MsrPermissionMapPa;
 
-  /* Devirtualize synchronization — flag polling, NOT IPI */
-  volatile LONG DevirtualizeFlag;   /* TRUE = all processors should exit */
-  volatile LONG DevirtualizedCount; /* Counts processors that have exited */
+  /* Devirtualize synchronization  /* Synchronization flags */
+  volatile LONG DevirtualizeFlag;    /* Set to TRUE to trigger devirtualize */
+  volatile LONG DevirtualizedCount;  /* Number of CPUs that exited VMRUN */
+  volatile LONG NptProtectionReady;  /* Set to TRUE after NPT protection complete */
 
   /* TLB flush synchronization — flag polling */
   volatile LONG TlbFlushPending;

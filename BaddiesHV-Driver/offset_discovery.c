@@ -7,13 +7,9 @@
 
 #include "offset_discovery.h"
 
-#define HV_LOG(fmt, ...)                                                       \
-  DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "[BaddiesHV] " fmt "\n",  \
-             ##__VA_ARGS__)
+#define HV_LOG(fmt, ...) DbgPrint("[BaddiesHV] " fmt "\n", ##__VA_ARGS__)
 
-#define HV_LOG_ERROR(fmt, ...)                                                 \
-  DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,                          \
-             "[BaddiesHV][ERROR] " fmt "\n", ##__VA_ARGS__)
+#define HV_LOG_ERROR(fmt, ...) DbgPrint("[BaddiesHV][ERROR] " fmt "\n", ##__VA_ARGS__)
 
 /* ============================================================================
  * Hardcoded fallback offsets (Windows 10/11 22H2)

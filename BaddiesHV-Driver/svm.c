@@ -21,13 +21,9 @@
 #include "offset_discovery.h"
 
 /* Logging tag for DbgPrintEx */
-#define HV_LOG(fmt, ...)                                                       \
-  DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "[BaddiesHV] " fmt "\n",  \
-             ##__VA_ARGS__)
+#define HV_LOG(fmt, ...) DbgPrint("[BaddiesHV] " fmt "\n", ##__VA_ARGS__)
 
-#define HV_LOG_ERROR(fmt, ...)                                                 \
-  DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,                          \
-             "[BaddiesHV][ERROR] " fmt "\n", ##__VA_ARGS__)
+#define HV_LOG_ERROR(fmt, ...) DbgPrint("[BaddiesHV][ERROR] " fmt "\n", ##__VA_ARGS__)
 
 /* ============================================================================
  *  Forward declarations for static handlers
@@ -319,8 +315,9 @@ NTSTATUS SvmInitializeVcpu(_In_ ULONG ProcessorIndex,
   /* Intercept MSR via MSRPM (bit 28 of DWORD 3) */
   ctrl->InterceptMisc1 |= INTERCEPT_MSR_PROT;
 
-  /* Intercept NMI (bit 1 of DWORD 3) */
-  ctrl->InterceptMisc1 |= INTERCEPT_NMI;
+  /* NMI intercept DISABLED - causes VMRUN hang on some systems.
+   * svm-vmm doesn't intercept NMI and works fine. */
+  // ctrl->InterceptMisc1 |= INTERCEPT_NMI;
 
   /* Intercept #MC — Machine Check Exception (vector 18 in DWORD 2) */
   ctrl->InterceptException |= INTERCEPT_EXCEPTION_MC;
@@ -835,6 +832,32 @@ static VOID HandleUnknownExit(_In_ PVCPU_DATA Vcpu,
 
 BOOLEAN SvmVmexitHandler(_Inout_ PVCPU_DATA Vcpu,
                          _Inout_ PGUEST_CONTEXT GuestCtx) {
+  UINT64 exitCode = Vcpu->GuestVmcb->Control.ExitCode;
+  
+  /*
+   * CRITICAL: NO LOGGING IN VMEXIT HANDLER!
+   * DbgPrint uses spinlocks and can deadlock/crash when called from
+   * VMEXIT context (especially with GIF=0). The debug logging below
+   * was causing immediate system reboots after the first VMEXIT.
+   */
+  
+  /* DEBUG: Disabled - causes system reboot
+  static volatile LONG firstExit = 0;
+  static volatile LONG exitCount = 0;
+  LONG currentCount = InterlockedIncrement(&exitCount);
+  
+  if (InterlockedCompareExchange(&firstExit, 1, 0) == 0) {
+    HV_LOG("CPU %u: First VMEXIT - ExitCode=0x%llX RIP=0x%llX", 
+           Vcpu->ProcessorIndex, exitCode, Vcpu->GuestVmcb->StateSave.Rip);
+  }
+  
+  if (currentCount % 100 == 0) {
+    HV_LOG("CPU %u: VMEXIT #%d - ExitCode=0x%llX RIP=0x%llX",
+           Vcpu->ProcessorIndex, currentCount, exitCode, 
+           Vcpu->GuestVmcb->StateSave.Rip);
+  }
+  */
+  
   /*
    * MINIMAL HANDLER — ZERO kernel calls (runs with GIF=0 or GIF=1).
    * Only uses intrinsics and direct VMCB writes. No DbgPrintEx,
@@ -850,7 +873,7 @@ BOOLEAN SvmVmexitHandler(_Inout_ PVCPU_DATA Vcpu,
      * Advance guest RIP past the current instruction so the guest
      * doesn't re-execute it after devirtualization.
      */
-    UINT64 exitCode = Vcpu->GuestVmcb->Control.ExitCode;
+    exitCode = Vcpu->GuestVmcb->Control.ExitCode;
     if (exitCode == VMEXIT_CPUID) {
       if (Vcpu->GuestVmcb->Control.NextRip != 0)
         Vcpu->GuestVmcb->StateSave.Rip = Vcpu->GuestVmcb->Control.NextRip;
@@ -873,7 +896,7 @@ BOOLEAN SvmVmexitHandler(_Inout_ PVCPU_DATA Vcpu,
   /* Reset TLB control (prevent flush storm) */
   Vcpu->GuestVmcb->Control.TlbControl = TLB_CONTROL_DO_NOTHING;
 
-  UINT64 exitCode = Vcpu->GuestVmcb->Control.ExitCode;
+  exitCode = Vcpu->GuestVmcb->Control.ExitCode;
 
   switch (exitCode) {
 
@@ -1393,9 +1416,10 @@ BOOLEAN SvmVmexitHandler(_Inout_ PVCPU_DATA Vcpu,
     UINT64 faultGpa = Vcpu->GuestVmcb->Control.ExitInfo2;
     UINT64 errorCode = Vcpu->GuestVmcb->Control.ExitInfo1;
 
-    /* Log the access attempt (runs with GIF=0, but DbgPrintEx is safe) */
+    /* CRITICAL: NO LOGGING - causes system crashes in VMEXIT context
     HV_LOG("CPU %u: #NPF at GPA 0x%llX (error 0x%llX) - protected HV structure",
            Vcpu->ProcessorIndex, faultGpa, errorCode);
+    */
 
     /* Inject #PF into guest — let OS handle it as a normal page fault.
      * Set CR2 to the faulting GPA so guest #PF handler sees it. */
@@ -1486,11 +1510,14 @@ static VOID SvmSubvertProcessorDpc(_In_ PKDPC Dpc,
   __svm_vmsave(vcpu->HostVmcbPa.QuadPart);
 
   /* ------------------------------------------------------------------
-   * Snapshot the VMCB state save area using VMSAVE
+   * Capture guest segment hidden state via VMSAVE
    *
-   * This captures the hidden segment state (bases, limits, attributes)
-   * that we can't read via intrinsics. VMSAVE writes to the VMCB
-   * pointed to by RAX.
+   * VMSAVE saves FS.base, GS.base, TR, LDTR, KernelGsBase, STAR, etc.
+   * These are CRITICAL for the guest to run - without them, triple fault.
+   *
+   * VMSAVE also captures RIP/RSP/RAX from the current CPU state.
+   * The assembly code in SvmLaunchVm will override RIP/RSP before VMRUN
+   * to point to @@GuestEntry and OriginalRsp.
    * ------------------------------------------------------------------ */
   __svm_vmsave(vcpu->GuestVmcbPa.QuadPart);
 
@@ -1514,7 +1541,78 @@ static VOID SvmSubvertProcessorDpc(_In_ PKDPC Dpc,
    * callback continues executing as a virtualized guest from here. */
   vcpu->Subverted = TRUE;
 
-  HV_LOG("CPU %u: Entering VMRUN — EFER=0x%llX", cpuIndex, efer);
+  /* ------------------------------------------------------------------
+   * NPT Protection DISABLED - Incompatible with 2MB Page NPT
+   *
+   * The current NPT implementation uses 2MB pages for identity mapping.
+   * Protecting hypervisor structures marks entire 2MB pages as non-present,
+   * which makes the structures inaccessible to the hypervisor itself.
+   *
+   * Why this causes a freeze:
+   *   1. Hypervisor structures (VMCB, MSRPM) allocated in same 2MB page
+   *   2. Marking the page non-present in NPT
+   *   3. Hypervisor tries to access VMCB → #NPF → freeze
+   *
+   * Solution (used by svm-vmm):
+   *   - Use 1GB huge pages for NPT (finer granularity)
+   *   - Allocate hypervisor structures in isolated physical regions
+   *   - Protect specific 2MB regions without affecting hypervisor access
+   *
+   * Alternative stealth approaches:
+   *   - Allocate structures from NonPagedPoolNx (harder to scan)
+   *   - Use ASLR/randomization for structure placement
+   *   - Implement memory access hooks to detect scanning
+   * ------------------------------------------------------------------ */
+#if 0  // NPT protection disabled - incompatible with current 2MB page NPT
+  if (cpuIndex == 0 && g_HvData.NptSupported) {
+    /* CPU 0: Wait for all VCPUs to be allocated */
+    UINT32 waitCount = 0;
+    while (waitCount < 10000) {
+      UINT32 readyCount = 0;
+      for (UINT32 i = 0; i < g_HvData.ProcessorCount; i++) {
+        if (g_HvData.VcpuArray[i] != NULL) {
+          readyCount++;
+        }
+      }
+      if (readyCount == g_HvData.ProcessorCount) {
+        break; /* All VCPUs allocated */
+      }
+      _mm_pause();
+      waitCount++;
+    }
+
+    HV_LOG("CPU 0: All VCPUs allocated, protecting NPT...");
+
+    /* Protect all hypervisor structures */
+    status = NptProtectHypervisorStructures(
+        &g_HvData.NptContext, &g_HvData.NptProtectionContext,
+        g_HvData.VcpuArray, g_HvData.ProcessorCount,
+        g_HvData.MsrPermissionMapPa.QuadPart, MSRPM_SIZE);
+    if (!NT_SUCCESS(status)) {
+      HV_LOG_ERROR("CPU 0: NPT protection failed (0x%08X) - continuing without protection",
+                   status);
+    } else {
+      HV_LOG("CPU 0: NPT protection enabled: %u ranges protected",
+             g_HvData.NptProtectionContext.RangeCount);
+    }
+
+    /* Signal that NPT protection is complete */
+    InterlockedExchange(&g_HvData.NptProtectionReady, TRUE);
+  } else if (g_HvData.NptSupported) {
+    /* Other CPUs: Wait for CPU 0 to finish NPT protection */
+    UINT32 waitCount = 0;
+    while (waitCount < 10000) {
+      if (InterlockedCompareExchange(&g_HvData.NptProtectionReady, TRUE, TRUE) == TRUE) {
+        break; /* NPT protection complete */
+      }
+      _mm_pause();
+      waitCount++;
+    }
+    HV_LOG("CPU %u: NPT protection complete, launching VM", cpuIndex);
+  }
+#endif
+
+  HV_LOG("CPU %u: Launching VM — EFER=0x%llX", cpuIndex, efer);
 
   /* ------------------------------------------------------------------
    * Set up HOST_STACK_LAYOUT at the top of the dedicated HostStack[].
@@ -1532,9 +1630,15 @@ static VOID SvmSubvertProcessorDpc(_In_ PKDPC Dpc,
     layout->Padding1 = 0;
     layout->Padding2 = 0;
 
+    /* NOTE: RIP/RSP are set by SvmLaunchVm assembly code (lines 104-106)
+     * to @@GuestEntry and OriginalRsp before the first VMRUN. */
+
     /* First return: guest entry. Second return: devirtualize. */
     SvmLaunchVm((UINT64)layout);
   }
+
+  /* DEBUG: Log return from SvmLaunchVm */
+  HV_LOG("CPU %u: Returned from SvmLaunchVm", cpuIndex);
 
   /* ------------------------------------------------------------------
    * We get here TWICE:
@@ -1607,6 +1711,7 @@ NTSTATUS SvmSubvertAllProcessors(VOID) {
   /* Initialize synchronization */
   InterlockedExchange(&g_HvData.DevirtualizeFlag, FALSE);
   InterlockedExchange(&g_HvData.DevirtualizedCount, 0);
+  InterlockedExchange(&g_HvData.NptProtectionReady, FALSE);
 
   /* Build NPT identity map (Phase 2) */
   if (g_HvData.NptSupported) {
@@ -1621,27 +1726,8 @@ NTSTATUS SvmSubvertAllProcessors(VOID) {
            g_HvData.NptContext.Pml4Pa);
   }
 
-  /* Launch DPC on all processors to initialize VCPUs */
+  /* Launch DPC on all processors to initialize VCPUs and protect NPT */
   KeGenericCallDpc(SvmSubvertProcessorDpc, NULL);
-
-  /* CRITICAL: Protect hypervisor structures AFTER VCPU init, BEFORE VM launch.
-   * This prevents EAC from detecting VMCB/MSRPM via physical memory scans.
-   * Must run AFTER KeGenericCallDpc because VCPUs are allocated in the DPC. */
-  if (g_HvData.NptSupported) {
-    status = NptProtectHypervisorStructures(
-        &g_HvData.NptContext, &g_HvData.NptProtectionContext,
-        g_HvData.VcpuArray, g_HvData.ProcessorCount,
-        g_HvData.MsrPermissionMapPa.QuadPart, MSRPM_SIZE);
-    if (!NT_SUCCESS(status)) {
-      HV_LOG_ERROR("NPT protection failed (0x%08X) - continuing without protection",
-                   status);
-      /* Non-fatal — hypervisor still works, just less stealthy */
-    } else {
-      HV_LOG("NPT protection enabled: %u ranges protected",
-             g_HvData.NptProtectionContext.RangeCount);
-    }
-  }
-
 
   /* Verify all processors subverted */
   UINT32 subvertedCount = 0;

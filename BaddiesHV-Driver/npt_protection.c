@@ -8,13 +8,9 @@
 #include "npt_protection.h"
 #include "svm.h"
 
-#define HV_LOG(fmt, ...)                                                       \
-  DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "[BaddiesHV] " fmt "\n",  \
-             ##__VA_ARGS__)
+#define HV_LOG(fmt, ...) DbgPrint("[BaddiesHV] " fmt "\n", ##__VA_ARGS__)
 
-#define HV_LOG_ERROR(fmt, ...)                                                 \
-  DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,                          \
-             "[BaddiesHV][ERROR] " fmt "\n", ##__VA_ARGS__)
+#define HV_LOG_ERROR(fmt, ...) DbgPrint("[BaddiesHV][ERROR] " fmt "\n", ##__VA_ARGS__)
 
 /* ============================================================================
  * NptProtectRange — Mark a GPA range as non-present in NPT
