@@ -467,7 +467,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/) {
   if (reason == DLL_PROCESS_ATTACH) {
     /* Drop a marker file to confirm DllMain was actually called.
      * Check for this file on the VM desktop after injection. */
-    HANDLE hMarker = CreateFileA("C:\\Users\\BobRoss\\Desktop\\INJECTED_OK.txt",
+    HANDLE hMarker = CreateFileA("C:\\Users\\xWantedStore\\Desktop\\INJECTED_OK.txt",
                                  GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                                  FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hMarker != INVALID_HANDLE_VALUE) {

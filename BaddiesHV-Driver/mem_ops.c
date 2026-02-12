@@ -129,10 +129,11 @@ static NTSTATUS HvTranslateGuestVa(_In_ UINT64 GuestCr3, _In_ UINT64 GuestVa,
  * ============================================================================
  */
 
-/* Windows 10/11 22H2 EPROCESS offsets */
-#define EPROCESS_ACTIVE_PROCESS_LINKS 0x448
-#define EPROCESS_UNIQUE_PROCESS_ID 0x440
-#define EPROCESS_DIRECTORY_TABLE_BASE 0x028
+/*
+ * EPROCESS/KTHREAD/KPRCB offsets are now discovered dynamically at runtime
+ * via offset_discovery.c and stored in g_HvData.Offsets.
+ * This allows the hypervisor to work across multiple Windows builds.
+ */
 
 /*
  * Read a UINT64 from guest physical address.
@@ -160,24 +161,43 @@ static UINT32 ReadGuestPhys32(UINT64 Gpa) {
 }
 
 /*
- * ReadKernelVa64 — Read a UINT64 from a kernel VA.
+ * ReadKernelVa64 — Read a UINT64 from a kernel VA (SAFE version).
  *
- * Direct read under CR3 swap. Safe because:
- *   - KPCR, KTHREAD, EPROCESS are NonPagedPool — always resident
- *   - Kernel mappings are identical in all CR3s
- *   - Addresses are validated as canonical kernel VAs before access
- *   - GIF=0 prevents preemption
+ * OLD APPROACH (unsafe):
+ *   - Swap to guest CR3, dereference pointer, swap back
+ *   - RISK: Page fault if kernel VA is paged out → BSOD at DISPATCH_LEVEL
+ *
+ * NEW APPROACH (safe):
+ *   - Translate KernelVa → GPA via guest page tables (HvTranslateGuestVa)
+ *   - Map GPA → host VA via MmGetVirtualForPhysical (always resident)
+ *   - Read from host VA (no page fault possible)
+ *
+ * This is safe because:
+ *   - HvTranslateGuestVa walks page tables via MmGetVirtualForPhysical
+ *   - MmGetVirtualForPhysical returns always-resident kernel VAs
+ *   - No CR3 swap = no risk of accessing paged-out memory
  */
 static UINT64 ReadKernelVa64(UINT64 GuestCr3, UINT64 HostCr3, UINT64 KernelVa) {
+  UNREFERENCED_PARAMETER(HostCr3); /* No longer needed */
+
   /* Reject non-kernel addresses to prevent page faults on garbage pointers */
   if (KernelVa < 0xFFFF800000000000ULL)
     return 0;
 
-  __writecr3(GuestCr3);
-  UINT64 value = *(volatile UINT64 *)KernelVa;
-  __writecr3(HostCr3);
+  /* Translate KernelVa → GPA via guest page tables */
+  UINT64 gpa;
+  NTSTATUS status = HvTranslateGuestVa(GuestCr3, KernelVa, &gpa);
+  if (!NT_SUCCESS(status))
+    return 0;
 
-  return value;
+  /* Map GPA → host VA (always safe, no page faults) */
+  PHYSICAL_ADDRESS pa;
+  pa.QuadPart = (LONGLONG)gpa;
+  volatile UINT64 *va = (volatile UINT64 *)MmGetVirtualForPhysical(pa);
+  if (!va)
+    return 0;
+
+  return *va;
 }
 
 /*
@@ -216,14 +236,16 @@ NTSTATUS HvCacheCr3(_In_ PVCPU_DATA Vcpu, _In_ UINT32 Pid,
   if (kpcrVa == 0)
     return STATUS_UNSUCCESSFUL;
 
-  /* KPCR + 0x180 = KPRCB, KPRCB + 0x008 = CurrentThread → offset 0x188 */
-  UINT64 currentThreadVa = ReadKernelVa64(guestCr3, hostCr3, kpcrVa + 0x188);
+  /* KPCR + KPRCB.CurrentThread (dynamic offset) */
+  UINT64 currentThreadVa = ReadKernelVa64(guestCr3, hostCr3, 
+                                           kpcrVa + g_HvData.Offsets.KprcbCurrentThread);
   if (currentThreadVa == 0)
     return STATUS_UNSUCCESSFUL;
 
-  /* KTHREAD + 0x98 = ApcState, ApcState + 0x20 = Process (EPROCESS*) */
+  /* KTHREAD.ApcState.Process (dynamic offset) */
   UINT64 currentProcessVa =
-      ReadKernelVa64(guestCr3, hostCr3, currentThreadVa + 0x98 + 0x20);
+      ReadKernelVa64(guestCr3, hostCr3, 
+                     currentThreadVa + g_HvData.Offsets.KthreadApcState + 0x20);
   if (currentProcessVa == 0)
     return STATUS_UNSUCCESSFUL;
 
@@ -233,14 +255,14 @@ NTSTATUS HvCacheCr3(_In_ PVCPU_DATA Vcpu, _In_ UINT32 Pid,
   UINT32 maxIterations = 4096;
 
   do {
-    /* Read UniqueProcessId */
+    /* Read UniqueProcessId (dynamic offset) */
     UINT64 procPid = ReadKernelVa64(guestCr3, hostCr3,
-                                    walkProcessVa + EPROCESS_UNIQUE_PROCESS_ID);
+                                    walkProcessVa + g_HvData.Offsets.EprocessUniqueProcessId);
 
     if ((UINT32)procPid == Pid) {
-      /* Found it! Read DirectoryTableBase */
+      /* Found it! Read DirectoryTableBase (dynamic offset) */
       UINT64 cr3 = ReadKernelVa64(
-          guestCr3, hostCr3, walkProcessVa + EPROCESS_DIRECTORY_TABLE_BASE);
+          guestCr3, hostCr3, walkProcessVa + g_HvData.Offsets.EprocessDirectoryTableBase);
 
       *Cr3Out = cr3;
 
@@ -255,15 +277,15 @@ NTSTATUS HvCacheCr3(_In_ PVCPU_DATA Vcpu, _In_ UINT32 Pid,
       return STATUS_SUCCESS;
     }
 
-    /* Follow ActiveProcessLinks.Flink */
+    /* Follow ActiveProcessLinks.Flink (dynamic offset) */
     UINT64 flink = ReadKernelVa64(
-        guestCr3, hostCr3, walkProcessVa + EPROCESS_ACTIVE_PROCESS_LINKS);
+        guestCr3, hostCr3, walkProcessVa + g_HvData.Offsets.EprocessActiveProcessLinks);
     if (flink == 0)
       break;
 
     /* flink points to the LIST_ENTRY inside the next EPROCESS.
      * Subtract ACTIVE_PROCESS_LINKS offset to get EPROCESS base. */
-    walkProcessVa = flink - EPROCESS_ACTIVE_PROCESS_LINKS;
+    walkProcessVa = flink - g_HvData.Offsets.EprocessActiveProcessLinks;
 
   } while (walkProcessVa != headProcessVa && --maxIterations > 0);
 

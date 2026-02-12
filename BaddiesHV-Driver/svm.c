@@ -17,6 +17,8 @@
  */
 
 #include "svm.h"
+#include "npt_protection.h"
+#include "offset_discovery.h"
 
 /* Logging tag for DbgPrintEx */
 #define HV_LOG(fmt, ...)                                                       \
@@ -73,6 +75,15 @@ HV_GLOBAL_DATA g_HvData = {0};
 
 NTSTATUS SvmCheckSupport(VOID) {
   int cpuInfo[4] = {0}; /* EAX, EBX, ECX, EDX */
+
+  /* Step 0: Discover Windows structure offsets (EPROCESS, KTHREAD, etc.)
+   * Must run before any CR3 caching or memory operations. */
+  NTSTATUS status = DiscoverOffsets(&g_HvData.Offsets);
+  if (!NT_SUCCESS(status)) {
+    HV_LOG_ERROR("Offset discovery failed (0x%08X) - using fallback offsets",
+                 status);
+    /* Non-fatal — fallback offsets are still populated */
+  }
 
   /* Step 1: Check CPUID Fn8000_0001 ECX[2] for SVM support */
   __cpuid(cpuInfo, 0x80000001);
@@ -1372,6 +1383,32 @@ BOOLEAN SvmVmexitHandler(_Inout_ PVCPU_DATA Vcpu,
     g_HvData.DevirtualizeFlag = TRUE;
     return TRUE;
 
+  case VMEXIT_NPF: {
+    /* Nested Page Fault — guest accessed NPT-protected memory.
+     * This occurs when guest/EAC tries to scan physical memory for
+     * hypervisor structures (VMCB, MSRPM, Host Save Area).
+     *
+     * ExitInfo1 = error code (P, W/R, U/S, RSVD, I/D bits)
+     * ExitInfo2 = faulting guest physical address */
+    UINT64 faultGpa = Vcpu->GuestVmcb->Control.ExitInfo2;
+    UINT64 errorCode = Vcpu->GuestVmcb->Control.ExitInfo1;
+
+    /* Log the access attempt (runs with GIF=0, but DbgPrintEx is safe) */
+    HV_LOG("CPU %u: #NPF at GPA 0x%llX (error 0x%llX) - protected HV structure",
+           Vcpu->ProcessorIndex, faultGpa, errorCode);
+
+    /* Inject #PF into guest — let OS handle it as a normal page fault.
+     * Set CR2 to the faulting GPA so guest #PF handler sees it. */
+    Vcpu->GuestVmcb->Control.EventInj =
+        EVENTINJ_VALID | EVENTINJ_TYPE_EXCEPTION | 14 | EVENTINJ_ERROR_VALID;
+    Vcpu->GuestVmcb->Control.EventInj |= (errorCode << 32);
+    Vcpu->GuestVmcb->StateSave.Cr2 = faultGpa;
+
+    /* Do NOT advance RIP — #PF handler will retry the instruction */
+    break;
+  }
+
+
   default:
     /* Unknown: try to advance RIP and continue */
     if (Vcpu->GuestVmcb->Control.NextRip != 0)
@@ -1584,8 +1621,27 @@ NTSTATUS SvmSubvertAllProcessors(VOID) {
            g_HvData.NptContext.Pml4Pa);
   }
 
-  /* Launch DPC on all processors */
+  /* Launch DPC on all processors to initialize VCPUs */
   KeGenericCallDpc(SvmSubvertProcessorDpc, NULL);
+
+  /* CRITICAL: Protect hypervisor structures AFTER VCPU init, BEFORE VM launch.
+   * This prevents EAC from detecting VMCB/MSRPM via physical memory scans.
+   * Must run AFTER KeGenericCallDpc because VCPUs are allocated in the DPC. */
+  if (g_HvData.NptSupported) {
+    status = NptProtectHypervisorStructures(
+        &g_HvData.NptContext, &g_HvData.NptProtectionContext,
+        g_HvData.VcpuArray, g_HvData.ProcessorCount,
+        g_HvData.MsrPermissionMapPa.QuadPart, MSRPM_SIZE);
+    if (!NT_SUCCESS(status)) {
+      HV_LOG_ERROR("NPT protection failed (0x%08X) - continuing without protection",
+                   status);
+      /* Non-fatal — hypervisor still works, just less stealthy */
+    } else {
+      HV_LOG("NPT protection enabled: %u ranges protected",
+             g_HvData.NptProtectionContext.RangeCount);
+    }
+  }
+
 
   /* Verify all processors subverted */
   UINT32 subvertedCount = 0;
@@ -1686,6 +1742,11 @@ VOID SvmDevirtualizeAllProcessors(VOID) {
   if (g_HvData.MsrPermissionMap != NULL) {
     MmFreeContiguousMemory(g_HvData.MsrPermissionMap);
     g_HvData.MsrPermissionMap = NULL;
+  }
+
+  /* Unprotect NPT ranges before destroying page tables */
+  if (g_HvData.NptSupported) {
+    NptUnprotectAll(&g_HvData.NptContext, &g_HvData.NptProtectionContext);
   }
 
   /* Free NPT page tables */

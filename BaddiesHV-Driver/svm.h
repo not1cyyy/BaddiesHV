@@ -20,6 +20,8 @@
 
 #include "../shared/hvcomm.h"
 #include "npt.h"
+#include "offset_discovery.h"
+#include "npt_protection.h"
 #include <intrin.h>
 #include <ntifs.h>
 
@@ -650,6 +652,10 @@ typedef struct _HV_GLOBAL_DATA {
 
   /* NPT (Nested Page Tables) — Phase 2 */
   NPT_CONTEXT NptContext; /* Identity map of physical memory */
+  NPT_PROTECTION_CONTEXT NptProtectionContext; /* Protected HV structures */
+
+  /* Dynamic offset discovery (Windows version-independent) */
+  OFFSET_CONTEXT Offsets;
 
   /* Feature support flags from CPUID check */
   BOOLEAN NptSupported;
