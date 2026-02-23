@@ -788,12 +788,10 @@ static VOID HandleVmmcall(_In_ PVCPU_DATA Vcpu) {
  * HandleUnknownExit — Default handler for unhandled VMEXIT reasons
  *
  * Logs the exit code, advances RIP past the faulting instruction,
- * and counts occurrences. If we exceed a threshold, devirtualizes
- * the processor as a safety valve (prevents infinite VMEXIT storms).
+ * and counts occurrences per processor. If this VCPU exceeds the
+ * threshold, only that VCPU triggers devirtualization, preventing
+ * one noisy core from silently tearing down all other VCPUs.
  */
-static UINT32 s_UnknownExitCounts[256] = {
-    0}; /* Per-processor would be better; quick hack */
-
 static VOID HandleUnknownExit(_In_ PVCPU_DATA Vcpu,
                               _Inout_ PGUEST_CONTEXT GuestCtx) {
   UNREFERENCED_PARAMETER(GuestCtx);
@@ -807,10 +805,10 @@ static VOID HandleUnknownExit(_In_ PVCPU_DATA Vcpu,
     Vcpu->GuestVmcb->StateSave.Rip += 3;
   }
 
-  /* Safety valve: count unknown exits and devirtualize if too many */
-  UINT32 idx = Vcpu->ProcessorIndex & 0xFF;
-  s_UnknownExitCounts[idx]++;
-  if (s_UnknownExitCounts[idx] > MAX_UNKNOWN_EXITS_THRESHOLD) {
+  /* Safety valve: per-VCPU counter — each processor is isolated.
+   * InterlockedIncrement is safe at any IRQL and from any VMEXIT context. */
+  LONG count = InterlockedIncrement(&Vcpu->UnknownExitCount);
+  if (count > MAX_UNKNOWN_EXITS_THRESHOLD) {
     InterlockedExchange(&g_HvData.DevirtualizeFlag, TRUE);
   }
 }

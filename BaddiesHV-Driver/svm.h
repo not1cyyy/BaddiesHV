@@ -748,6 +748,11 @@ typedef struct _VCPU_DATA {
   UINT32 ProcessorIndex;
   BOOLEAN Subverted; /* TRUE after successful VMRUN */
 
+  /* === Per-processor unknown VMEXIT storm counter ===
+   * Replaces the former global s_UnknownExitCounts[256] array.
+   * Incremented via InterlockedIncrement — safe from any VMEXIT context. */
+  volatile LONG UnknownExitCount;
+
 } VCPU_DATA, *PVCPU_DATA;
 
 /* Verify VCPU_DATA field offsets match the ASM EQU constants.
