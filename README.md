@@ -1,3 +1,7 @@
+<div align=center>
+  <img src="https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExNXlxd2JkenVxcGs2YXplMmxzNXNnd21wOHg1NWU0MWh2ZWIxbDJicSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/11tmhZRjavMMIE/giphy.gif" width="600"/>
+</div>
+
 # BaddiesHV
 
 **A stealth AMD-V hypervisor with anti-cheat evasion capabilities**
