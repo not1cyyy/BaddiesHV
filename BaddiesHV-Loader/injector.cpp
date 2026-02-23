@@ -94,9 +94,10 @@ static bool HvAllocMemory(uint32_t pid, uint64_t size, uint64_t *outBase) {
     return false;
   }
 
-  /* Poll for completion — worker thread is async */
+  /* Poll for completion — worker thread wakes every 1 ms.
+   * 2 ms sleep × 200 = 400 ms worst-case timeout. */
   for (int i = 0; i < 200; i++) {
-    Sleep(50);
+    Sleep(2);
     __cpuidex(regs, HV_CPUID_LEAF, HV_CMD_PING);
     if (g_SharedPage->request.result != 0) {
       *outBase = g_SharedPage->request.result;
