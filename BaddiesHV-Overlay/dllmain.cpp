@@ -465,27 +465,11 @@ static DWORD WINAPI InitThread(LPVOID lpParam) {
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/) {
   if (reason == DLL_PROCESS_ATTACH) {
-    /* Drop a marker file to confirm DllMain was actually called.
-     * Check for this file on the VM desktop after injection. */
-    HANDLE hMarker = CreateFileA("C:\\Users\\xWantedStore\\Desktop\\INJECTED_OK.txt",
-                                 GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                                 FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hMarker != INVALID_HANDLE_VALUE) {
-      const char msg[] = "DllMain called successfully!\r\n";
-      DWORD written;
-      WriteFile(hMarker, msg, sizeof(msg) - 1, &written, nullptr);
-      CloseHandle(hMarker);
-    }
-
-    /* TEMPORARY: Skip D3D11 hooks to isolate crash source.
-     * If INJECTED_OK.txt appears and no crash → injection works,
-     * problem is in InitThread's D3D11 operations. */
-    // g_Module = hModule;
-    // DisableThreadLibraryCalls(hModule);
-    // HANDLE hThread = CreateThread(nullptr, 0, InitThread, nullptr, 0,
-    //                               nullptr);
-    // if (hThread)
-    //   CloseHandle(hThread);
+    g_Module = hModule;
+    DisableThreadLibraryCalls(hModule);
+    HANDLE hThread = CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr);
+    if (hThread)
+      CloseHandle(hThread);
   }
   return TRUE;
 }
