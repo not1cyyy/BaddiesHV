@@ -458,8 +458,7 @@ static bool LoadDriver() {
 
 int main() {
   printf("========================================\n");
-  printf("  BaddiesHV Loader v3.0                 \n");
-  printf("  Phase 4: KDMapper + Memory R/W        \n");
+  printf("  BaddiesHV Loader v1.0                 \n");
   printf("========================================\n\n");
 
   UINT32 core = 0;
