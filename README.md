@@ -8,7 +8,7 @@ BaddiesHV is a research-focused, thin AMD SVM (Secure Virtual Machine) hyperviso
 
 ---
 
-## 🎯 Features
+## Features
 
 ### Core Hypervisor (BaddiesHV-Driver)
 - **AMD SVM Virtualization**: Full AMD-V hardware virtualization with VMCB management
@@ -52,7 +52,7 @@ BaddiesHV is a research-focused, thin AMD SVM (Secure Virtual Machine) hyperviso
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -100,7 +100,7 @@ BaddiesHV is a research-focused, thin AMD SVM (Secure Virtual Machine) hyperviso
 
 ---
 
-## 📋 Requirements
+## Requirements
 
 ### Hardware
 - **AMD CPU** with SVM support (AMD-V virtualization)
@@ -120,7 +120,7 @@ BaddiesHV is a research-focused, thin AMD SVM (Secure Virtual Machine) hyperviso
 
 ---
 
-## 🚀 Building
+## Building
 
 ### Option 1: Visual Studio (Recommended)
 1. Open `BaddiesHV.sln` in Visual Studio
@@ -146,7 +146,7 @@ msbuild BaddiesHV-Overlay\BaddiesHV-Overlay.vcxproj /p:Configuration=Release /p:
 
 ---
 
-## 🎮 Usage
+## Usage
 
 ### 1. Load the Hypervisor
 ```powershell
@@ -198,7 +198,7 @@ Select option **8** to devirtualize all processors and unload.
 
 ---
 
-## 🔬 Hypercall API
+## Hypercall API
 
 ### Shared Page Registration
 ```c
@@ -278,7 +278,7 @@ uint64_t moduleBase = g_SharedPage->request.result;
 
 ---
 
-## 🛡️ Anti-Cheat Considerations
+## Anti-Cheat Considerations
 
 ### What This Hypervisor Does
 ✅ **Stealth Features:**
@@ -309,7 +309,7 @@ uint64_t moduleBase = g_SharedPage->request.result;
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 BaddiesHV/
@@ -338,7 +338,7 @@ BaddiesHV/
 
 ---
 
-## 🧪 Testing & Verification
+## Testing & Verification
 
 ### Hardware Support Check
 ```powershell
@@ -373,7 +373,7 @@ View hypervisor logs via DebugView or WinDbg:
 
 ---
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
 ### "SVM hardware check failed"
 - Ensure AMD-V is enabled in BIOS
@@ -397,7 +397,7 @@ View hypervisor logs via DebugView or WinDbg:
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 This is a research project. Contributions are welcome for:
 - Additional stealth techniques
@@ -412,7 +412,7 @@ This is a research project. Contributions are welcome for:
 
 ---
 
-## 📜 License
+## License
 
 This project is provided **as-is** for educational and research purposes only.
 
@@ -420,17 +420,17 @@ This project is provided **as-is** for educational and research purposes only.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **SimpleSvm** - Original AMD SVM hypervisor framework (forked base)
 - **HyperPlatform** - Reference for NPT implementation
 - **KDMapper** - Manual driver mapping technique
 - **ImGui** - Immediate-mode GUI library
 - **AMD** - AMD64 Architecture Programmer's Manual
-
+- **dzxpert** - Original maintainer
 ---
 
-## 📚 References
+## References
 
 - [AMD64 Architecture Programmer's Manual Volume 2: System Programming](https://www.amd.com/system/files/TechDocs/24593.pdf)
 - [SimpleSvm - A simple SVM-based hypervisor](https://github.com/tandasat/SimpleSvm)
