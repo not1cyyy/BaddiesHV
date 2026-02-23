@@ -768,7 +768,7 @@ typedef struct _HV_GLOBAL_DATA {
   PVOID MsrPermissionMap; /* MSRPM — 8KB (2 pages), page-aligned */
   PHYSICAL_ADDRESS MsrPermissionMapPa;
 
-  /* Devirtualize synchronization  /* Synchronization flags */
+  /* Devirtualize synchronization flags */
   volatile LONG DevirtualizeFlag;    /* Set to TRUE to trigger devirtualize */
   volatile LONG DevirtualizedCount;  /* Number of CPUs that exited VMRUN */
   volatile LONG NptProtectionReady;  /* Set to TRUE after NPT protection complete */
